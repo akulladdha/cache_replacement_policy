@@ -1,8 +1,9 @@
-# SRRIP and BRRIP in gem5
+# CPU Cache Replacement Policies in gem5
 
-Two cache replacement policies, SRRIP and BRRIP, implemented in gem5's C++
-memory hierarchy and measured across a sweep of working-set sizes to find the
-point where one overtakes the other.
+Two published cache replacement policies, SRRIP and BRRIP (Static and Bimodal
+Re-Reference Interval Prediction), implemented in gem5's C++ memory hierarchy
+and measured across a sweep of working-set sizes to find the point where one
+overtakes the other.
 
 ## TL;DR
 
