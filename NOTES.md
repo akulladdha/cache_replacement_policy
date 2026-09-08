@@ -244,3 +244,20 @@ so the cold-cache deltas were trustworthy.
 Caveat recorded in the README: at 16 MiB the fixed 4M-instruction warmup no
 longer covers the whole list-building phase, so that point reads 0.9716
 instead of 1.0000. Does not touch the transition region.
+
+## Reproducibility gotcha: the binary path changes the numbers
+
+Running the same benchmark from two different paths gave slightly different
+miss counts: 1218365 from `benchmarks/bin/chase`, 1218098 from a copy at
+`~/srrip-work/bin/chase`. A 0.02% difference, so it changes no conclusion, but
+it is not noise and it repeats exactly.
+
+Cause: gem5 SE mode puts `argv[0]` on the simulated stack, so a longer path
+shifts the initial stack pointer, which shifts every stack address, which
+changes which sets those addresses map to. Deterministic, just
+path-dependent.
+
+Consequence: every run in the committed dataset uses the same
+`$REPO_ROOT/benchmarks/bin` path, via `sweep.sh`. Re-running one point from
+that path reproduces the committed number exactly. Do not mix binary
+locations within a dataset.
