@@ -92,6 +92,81 @@ thesis of the project showing up in the very first four-row table.
   before a way holding live data. Not part of the paper; it matters while
   the cache is still filling.
 
+## Validation against gem5's own RRIP
+
+`--policy SRRIP_REF` and `--policy BRRIP_REF` in `configs/run.py` select
+gem5's upstream `BRRIPRP` instead of mine. Not part of the dataset, purely a
+correctness check.
+
+Result: **bit-identical miss counts** on both workloads.
+
+| run | my policy | gem5 reference |
+|---|---|---|
+| mixed, SRRIP | 444024 | 444024 |
+| mixed, BRRIP | 444026 | 444026 |
+| chase 1280 KiB, SRRIP | 2817337 | 2817337 |
+| chase 1280 KiB, BRRIP | 1218098 | 1218098 |
+
+The comparison only works with `hit_priority=True` on gem5's side. Its
+default is `False`, which is the paper's *frequency priority* variant: a hit
+decrements the RRPV by one instead of setting it to zero. That is a genuinely
+different policy, and comparing against it made my correct implementation look
+broken by about 26k hits. Worth remembering: when validating against a
+reference, check you configured the reference to be the same algorithm.
+
+Also confirms gem5 implements SRRIP as BRRIP with `btp=100`, which matches
+how the paper describes the relationship.
+
+## Two benchmark bugs that produced convincing garbage
+
+Both of these produced clean-looking numbers that were meaningless. Neither
+showed up as an error.
+
+**1. gcc collapsed the repeated read passes.** `stream.c` and `mixed.c` both
+re-read an array N times and accumulate into a sum. That is a pure reduction
+with no side effects, so at `-O2` gcc is entitled to run the loop once and
+multiply, and it does. The benchmarks therefore had no reuse at all, so every
+policy scored identically and it looked like a boring-but-plausible result.
+Fixed with an empty `__asm__ __volatile__("" ::: "memory")` between passes.
+Caught by noticing the L2 access count was far lower than the arithmetic said
+it should be.
+
+**2. A sequentially scanned hot set made LRU and SRRIP identical to the
+unit.** After fix 1, `mixed.c` still showed LRU and SRRIP producing
+*bit-identical* miss counts at every hot-set size, while BRRIP differed by 2.
+Exactly equal counts between two different policies is the tell: the victim
+decisions never diverged. Walking the hot set in a fixed scattered order
+instead of index order fixed it, and the three policies then separated
+cleanly. Same working set, same reuse pattern, same instruction count, just
+without the index-order structure.
+
+The general lesson, and the reason the LRU-vs-Random gate exists: a
+replacement-policy experiment fails silently. There is no crash and no
+warning, just numbers that are wrong in a believable way.
+
+## What mixed.c actually shows
+
+Not what was planned. The intent was "insertion policy protects the hot set,
+so BRRIP wins". The measurement says the opposite: **BRRIP is consistently
+worse on mixed.c, and worse by more as the hot set grows.**
+
+| hot set | LRU | SRRIP | BRRIP |
+|---|---|---|---|
+| 64 KiB | 0.9129 | 0.9131 | 0.9151 |
+| 128 KiB | 0.8436 | 0.8444 | 0.8567 |
+| 256 KiB | 0.7408 | 0.7424 | 0.7735 |
+| 512 KiB | 0.6122 | 0.6189 | 0.6695 |
+
+This is right, and it is more useful than the planned result. BRRIP inserts
+almost everything at the distant interval, so a hot set that is being brought
+back into the cache cannot accumulate: each newly inserted hot line is itself
+the next eviction candidate, and only the small `btp` fraction survives long
+enough to be hit and promoted. A policy that refuses to retain most of what it
+sees cannot build up a working set it should have kept.
+
+So chase.c and mixed.c are the two sides of the same argument, which is the
+argument for DRRIP. Kept both.
+
 ## Config decisions
 
 - Two-level hierarchy. The policy sits at L2, which is the last level, so L2
@@ -138,3 +213,34 @@ than spread evenly in log space. The first smoke tests showed that at 4x
 overcommit every policy sits above 96 percent miss rate and the lines are
 almost on top of each other. The interesting region is within a factor of
 about two of capacity, so that is where the points went.
+
+## Warmup (stretch goal S1)
+
+`--warmup-insts N` on `configs/run.py`. Starts on `CPUTypes.ATOMIC` via
+`SimpleSwitchableProcessor`, switches to `TIMING` after N instructions, calls
+`m5.stats.reset()` at the switch. Wired through
+`Simulator(on_exit_event={ExitEvent.MAX_INSTS: handler})` plus
+`simulator.schedule_max_insts(N)`. The handler must `yield` so the simulator
+treats it as a generator and carries on.
+
+Order inside the handler matters: `processor.switch()` first, then
+`m5.stats.reset()`. Reset first and the switch itself lands in the measured
+window.
+
+Verified it actually works rather than assuming: no-warmup run of
+`chase 1280` reports 8,336,428 `simInsts`, the warmed run reports 6,336,340,
+and 8,336,428 - 6,336,340 = 2,000,088, which is the 2,000,000 warmup plus the
+few instructions it takes to reach the exit event. gem5 also prints
+"switching cpus".
+
+Warmup sweep lives in a separate output tree (`~/srrip-work/m5out-warm`) and
+a separate CSV so both datasets survive.
+
+Findings: below capacity the miss rate drops more than 10x (0.0036 -> 0.0001),
+confirming those were nearly all compulsory misses. Past capacity LRU goes to
+a flat 1.0000. The SRRIP-minus-BRRIP gap moves by under 0.007 everywhere,
+so the cold-cache deltas were trustworthy.
+
+Caveat recorded in the README: at 16 MiB the fixed 4M-instruction warmup no
+longer covers the whole list-building phase, so that point reads 0.9716
+instead of 1.0000. Does not touch the transition region.
