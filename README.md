@@ -66,6 +66,34 @@ resistance. Only BRRIP holds a low miss rate past capacity, and only over a
 narrow band. **No one of these policies is right everywhere, and which one
 wins depends on a property of the workload that is not known until run time.**
 
+## The size of the win
+
+The plot above shows three absolute curves and leaves you to eyeball the
+vertical distance between them. This one plots that distance directly, which
+is the quantity the whole project is about.
+
+![BRRIP's reduction in L2 misses against LRU and SRRIP, relative and absolute](plots/brrip_improvement.png)
+
+BRRIP's advantage peaks immediately past capacity and then collapses. At a
+1.125 MiB working set it avoids 74 percent of LRU's L2 misses and 67 percent
+of SRRIP's, worth 271 MPKI against LRU. One step further out the gain is
+already down to 60 percent, by 1.75 MiB it is under 10 percent, and by
+2.3 MiB it is gone. Everything BRRIP is good for happens inside roughly one
+doubling of the cache size.
+
+The two panels disagree in one place, and the disagreement is the point. At
+the capacity point itself the relative panel shows BRRIP taking 12 percent off
+LRU's miss count, which sounds worth having until the absolute panel shows it
+is 0.4 MPKI. Everything still fits down there, so every policy already hits on
+almost every access, and a large share of a very small number is still a very
+small number. Quoting only the percentage would make BRRIP look useful in a
+region where it does essentially nothing.
+
+That narrowness is the argument for adaptivity rather than against BRRIP. A
+policy with a 74 percent win available in one band and nothing outside it is
+exactly the case for selecting between policies at run time instead of picking
+one at design time.
+
 ## Scope
 
 Implemented: SRRIP, BRRIP, the sweep harness, and the measurement.
@@ -263,8 +291,14 @@ affect the transition region, which is where every conclusion here comes from.
 │   ├── sweep.sh                run the full sweep in parallel
 │   ├── scrape.py               stats.txt and config.json to CSV
 │   └── plot.py                 the figures
-├── results/data.csv
+├── results/
+│   ├── data.csv                cold-cache dataset, 72 runs
+│   └── data_warmup.csv         same sweep with warmup, 72 runs
 └── plots/
+    ├── crossover.png           miss rate and MPKI vs working set
+    ├── brrip_improvement.png   how much BRRIP wins by, and where
+    ├── workloads.png           mixed.c hot-set sweep and stream.c control
+    └── *_warmup.png            the same two figures from the warmed dataset
 ```
 
 ## Reproducing
