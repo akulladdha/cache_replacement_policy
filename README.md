@@ -4,20 +4,66 @@ Two cache replacement policies, SRRIP and BRRIP, implemented in gem5's C++
 memory hierarchy and measured across a sweep of working-set sizes to find the
 point where one overtakes the other.
 
+## TL;DR
+
+**What was built.** SRRIP and BRRIP as gem5 replacement policies in C++
+(`SRRIPRP` and `BRRIPCustomRP`), a config harness that exposes the L2 policy
+as a parameter, and three microbenchmarks. 72 sweep points, run twice, cold
+and warmed, for 144 simulations total. DRRIP is **not** built; its runtime
+set-dueling is deliberately out of scope.
+
+**The headline number.** At a working set 12 percent larger than the 1 MiB
+L2, BRRIP misses on 25.7 percent of L2 accesses where SRRIP misses on 78.5
+percent and LRU on 99.4 percent. That is a 3.9x reduction in misses from
+changing one line of insertion logic.
+
+**The crossover.** BRRIP overtakes SRRIP right at cache capacity, around
+1.0 MiB, and the advantage is gone again by about 2.2 MiB. Past roughly 3 MiB
+all three policies sit within 0.0011 of each other, because at several times
+capacity there is nothing left for any eviction decision to protect.
+
+**The other side of it.** On `mixed.c`, where a small hot set genuinely is
+worth keeping, BRRIP is the *worst* of the three and gets worse as the hot set
+grows: 0.6695 against LRU's 0.6122 at a 512 KiB hot set. Neither static policy
+wins everywhere, and the boundary sits at a workload property nothing knows
+before run time. That is precisely the argument for DRRIP.
+
+**Correctness.** Miss counts are bit-identical to gem5's own RRIP
+implementation on both workloads. Separately, LRU and Random produce different
+miss counts at identical instruction counts, which proves the policy parameter
+actually reaches the cache rather than being silently ignored.
+
+**Warmup.** An atomic-core warmup with a stats reset at the switch changes
+absolute miss rates by more than tenfold below capacity, but moves the
+SRRIP-minus-BRRIP gap by at most 0.0071 anywhere. The cold-cache deltas the
+crossover rests on hold up.
+
+**Setup.** Two-level hierarchy with the policy at L2, which is the LLC here.
+1 MiB 16-way L2, `TimingSimpleCPU`, Syscall Emulation mode, single core,
+statically linked binaries, and prefetchers disabled at both L1D and L2 so the
+measurement reflects replacement rather than prefetching.
+
+**Two benchmark bugs were found and fixed**, both of which produced clean,
+plausible, meaningless numbers: gcc collapsing repeated read passes at `-O2`,
+and a sequentially scanned hot set that made LRU and SRRIP take bit-identical
+eviction decisions. Details in [`NOTES.md`](NOTES.md).
+
 ![L2 miss rate and MPKI against working-set size for LRU, SRRIP and BRRIP](plots/crossover.png)
 
-The plot is a pointer chase over a randomly permuted list, run against a
-1 MiB 16-way L2 with the policy under test installed at that level. Below
-capacity all three policies are indistinguishable, because everything fits and
-nothing needs evicting. Past capacity they separate hard. At a 1.125 MiB
-working set, only 12 percent over the cache, LRU misses on 99.4 percent of L2
-accesses and SRRIP on 78.5 percent, while BRRIP misses on 25.7 percent. That
-is a 3.9x reduction in L2 misses from changing one line of insertion logic.
-The advantage decays as the working set grows and is gone by about 2.2 MiB,
-where all three converge on missing nearly everything. The whole interesting
-region is a narrow band just past capacity, which is the point: **no one of
-these policies is right everywhere, and which one wins depends on a property
-of the workload that is not known until run time.**
+The workload is a pointer chase over a randomly permuted list, run against a
+1 MiB 16-way L2 with the policy under test installed at that level. Reuse
+distance equals the working set, so below capacity every lap hits and all
+three policies are indistinguishable. Past capacity a line is evicted before
+the chase laps back to it, and the policies separate hard.
+
+The shape is the argument. LRU falls off a cliff the moment the working set
+stops fitting, because a cyclic pattern is the worst case for recency: it
+evicts precisely the line that will be needed soonest. SRRIP degrades more
+gently through the transition, which is its scan resistance working, but it
+converges back onto LRU by 2 MiB because scan resistance is not thrash
+resistance. Only BRRIP holds a low miss rate past capacity, and only over a
+narrow band. **No one of these policies is right everywhere, and which one
+wins depends on a property of the workload that is not known until run time.**
 
 ## Scope
 
@@ -85,7 +131,7 @@ checked without re-running anything.
 Two things worth noting in that table. SRRIP beats LRU substantially in the
 transition region, which is its scan resistance doing what it is supposed to
 do, but it converges back to LRU by 2 MiB because scan resistance is not
-thrash resistance. And past about 3 MiB all three policies are within 0.001 of
+thrash resistance. And past about 3 MiB all three policies are within 0.0011 of
 each other, because at four times capacity there is nothing left for any
 replacement decision to protect.
 

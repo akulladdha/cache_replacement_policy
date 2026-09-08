@@ -238,7 +238,7 @@ a separate CSV so both datasets survive.
 
 Findings: below capacity the miss rate drops more than 10x (0.0036 -> 0.0001),
 confirming those were nearly all compulsory misses. Past capacity LRU goes to
-a flat 1.0000. The SRRIP-minus-BRRIP gap moves by under 0.007 everywhere,
+a flat 1.0000. The SRRIP-minus-BRRIP gap moves by at most 0.0071 anywhere,
 so the cold-cache deltas were trustworthy.
 
 Caveat recorded in the README: at 16 MiB the fixed 4M-instruction warmup no
