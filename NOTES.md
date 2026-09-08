@@ -1,0 +1,140 @@
+# NOTES
+
+Working scratchpad. Commands that worked, field names, dead ends, decisions.
+Unformatted on purpose.
+
+## Environment
+
+- gem5 checkout at `~/gem5`, on the WSL2 native filesystem, not `/mnt/c`.
+  Building on `/mnt/c` goes through the 9p bridge and is far slower.
+- gem5 commit `cbf0eae213`.
+- Host gcc 15.2.0. gem5 warns it officially supports up to 14.2. Built fine
+  anyway; no errors traceable to the compiler version.
+- Binary is `build/ALL/gem5.opt`, **not** `build/X86/gem5.opt`. Modern gem5
+  builds one binary covering every ISA via Kconfig. The ISA is chosen at
+  config time instead, with `isa=ISA.X86` on the processor. Anything written
+  against the old per-ISA build layout needs adjusting.
+- The repo itself lives on the Windows Desktop under OneDrive. Simulation
+  output goes to `~/srrip-work/m5out` in the WSL home directory so that
+  thousands of intermediate files never touch OneDrive. Only `results/` and
+  `plots/` come back.
+- `git init` fails on the OneDrive path from inside WSL with
+  `could not write config file .git/config: Permission denied`. Running git
+  from Windows against the same directory works fine. All commits made from
+  the Windows side.
+- Python on Ubuntu is PEP 668 managed, so `pip install matplotlib` refuses.
+  Used a venv at `~/srrip-work/venv`.
+
+## Stats field names (confirmed, do not trust from memory)
+
+Read out of a real `stats.txt` from this build:
+
+```
+board.cache_hierarchy.l2-cache-0.overallMisses::total
+board.cache_hierarchy.l2-cache-0.overallAccesses::total
+board.cache_hierarchy.l2-cache-0.overallMissRate::total
+simInsts
+simSeconds
+```
+
+The `board.cache_hierarchy.` prefix comes from the stdlib board and hierarchy
+object names. Rename the hierarchy attribute and these all change.
+
+## Acceptance gate (Saturday morning, the one that is not optional)
+
+Same binary, `chase 4096`, 1 MiB 16-way L2:
+
+| policy | overallMisses | simInsts |
+|---|---|---|
+| LRU | 1581765 | 6117956 |
+| Random | 1550485 | 6117956 |
+
+Different miss counts, identical instruction counts. The `--policy` flag
+reaches the cache. Gate passed, safe to generate a dataset.
+
+Second gate, after the policies were compiled in, same configuration:
+
+| policy | overallMisses |
+|---|---|
+| LRU | 1581765 |
+| Random | 1550485 |
+| SRRIP | 1582343 |
+| BRRIP | 1578749 |
+
+All four distinct. SRRIP lands essentially on top of LRU here, which is the
+expected result at 4x overcommit: SRRIP has scan resistance but no thrash
+resistance, so on a cyclic reference pattern much larger than the cache it
+behaves like LRU. BRRIP is the only one that improves. That is the whole
+thesis of the project showing up in the very first four-row table.
+
+## Implementation notes
+
+- `reset()` is **insertion**, `touch()` is a **hit**. Written at the top of
+  `srrip_rp.hh` in capital letters because reversing them compiles, runs, and
+  produces plausible wrong numbers.
+- `invalidate()` is non-const in `base.hh`; `touch()` and `reset()` are const.
+  There are also `(replacement_data, PacketPtr)` overloads which default to
+  forwarding to the single-argument versions. Not needed here.
+- gem5 already ships `brrip_rp.*` and a `BRRIPRP` SimObject. Mine are named
+  `brrip_custom_rp.*` and `BRRIPCustomRP` so both live in the same binary and
+  nothing upstream is clobbered. SRRIP had no name collision.
+- `BRRIPCustom` inherits from `SRRIP` and overrides only `reset()`. Copying
+  the file would have worked equally well, but inheritance states the actual
+  claim: the only difference between the two policies is where lines enter.
+- The old global `random_mt` no longer exists in this gem5. The current API
+  is `Random::RandomPtr rng = Random::genRandom();` then
+  `rng->random<unsigned>(1, 100)`. Found by grepping `random_rp.cc`.
+- `getVictim()` uses the aging-delta shortcut rather than literal
+  increment-and-rescan. One pass finds the largest RRPV present, then every
+  candidate is aged by `maxRRPV - largest`. Same victim, same resulting
+  counters, one pass instead of up to four.
+- Added a `valid` flag to the replacement data so an empty way is taken
+  before a way holding live data. Not part of the paper; it matters while
+  the cache is still filling.
+
+## Config decisions
+
+- Two-level hierarchy. The policy sits at L2, which is the last level, so L2
+  is what the writeup calls the LLC.
+- Copied the stdlib `PrivateL1PrivateL2CacheHierarchy` into
+  `configs/hierarchy.py` and edited it. The stdlib version hard-codes L2
+  associativity at 4 and gives no way to reach the replacement policy.
+  Converting the relative `....isas` style imports to absolute `gem5.*`
+  imports was the only other change needed to run it as a standalone config.
+- **Prefetchers off, both L1D and L2.** The stdlib attaches a
+  `StridePrefetcher` to each. An L1 prefetcher generates its own requests
+  down to L2, so with it on, part of the L2 access stream being measured was
+  generated by the prefetcher rather than the benchmark. The L2 stats even
+  show a `::cache_hierarchy.l1d-cache-0.prefetcher` requestor column, which
+  is how this got noticed. Turning them off is the difference between
+  measuring the replacement policy and measuring the prefetcher.
+- `TimingSimpleCPU`, single core, SE mode. No O3: MPKI is a property of the
+  access stream, and an in-order core generates the same stream far faster.
+- Baseline L2 1 MiB, 16-way, deliberately small so `chase.c` overruns it
+  quickly and each simulation stays short.
+
+## Benchmarks
+
+- All `-O2 -static`. Static is not negotiable under SE mode.
+- `chase.c` nodes are padded to 64 bytes so one node occupies exactly one
+  cache line and a request for N KiB touches exactly N KiB of distinct lines.
+- Sattolo shuffle rather than Fisher-Yates, because Sattolo guarantees a
+  single cycle covering every node. Fisher-Yates can produce several short
+  disjoint cycles, in which case the chase would only ever touch one of them
+  and the working set would silently be smaller than requested.
+- Step count is fixed and independent of working-set size, so every sweep
+  point executes very nearly the same number of instructions and MPKI stays
+  comparable across the x axis.
+- Own xorshift PRNG rather than `rand()`, so the permutation is identical
+  across libc versions and runs reproduce.
+
+## Sweep
+
+`scripts/sweep.sh`, 39 runs, 8 at a time via `xargs -P8`.
+
+Working-set points are clustered around the 1 MiB capacity
+(128, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 8192, 16384 KiB) rather
+than spread evenly in log space. The first smoke tests showed that at 4x
+overcommit every policy sits above 96 percent miss rate and the lines are
+almost on top of each other. The interesting region is within a factor of
+about two of capacity, so that is where the points went.

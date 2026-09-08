@@ -18,6 +18,20 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+/*
+ * Prevent the compiler from merging the repeated passes. Summing the same
+ * array `passes` times is a pure reduction, so at -O2 gcc will happily run
+ * the loop once and multiply. That would leave this benchmark touching the
+ * array a single time, which is not what it is supposed to measure. See the
+ * longer note in mixed.c, where the same optimisation silently invalidated
+ * an entire set of results.
+ */
+static inline void
+barrier(void)
+{
+    __asm__ __volatile__("" : : : "memory");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -56,6 +70,7 @@ main(int argc, char **argv)
         for (size_t i = 0; i < n; i += stride) {
             sum += a[i];
         }
+        barrier();
     }
 
     printf("stream: ws=%zuKB passes=%zu sum=%llu\n",

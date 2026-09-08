@@ -26,6 +26,7 @@ import sys
 
 import m5
 from m5.objects import (
+    BRRIPRP,
     LRURP,
     RandomRP,
 )
@@ -81,6 +82,23 @@ def build_replacement_policy(name: str, num_bits: int, btp: int):
         return LRURP()
     if name == "RANDOM":
         return RandomRP()
+    if name in ("BRRIP_REF", "SRRIP_REF"):
+        # gem5's own RRIP implementation, used only to validate mine against
+        # a known-good reference. Not part of the reported dataset.
+        #
+        # hit_priority=True is the setting that matches my touch(), which
+        # sets RRPV to zero on a hit. gem5's default of False instead
+        # decrements the counter, which is the paper's frequency-priority
+        # variant and a genuinely different policy. Comparing against the
+        # wrong variant makes a correct implementation look broken.
+        #
+        # gem5 implements SRRIP as its BRRIP with btp=100, that is, always
+        # insert at the long interval and never at the distant one.
+        return BRRIPRP(
+            num_bits=num_bits,
+            btp=100 if name == "SRRIP_REF" else btp,
+            hit_priority=True,
+        )
     raise ValueError(
         f"unknown policy {name!r}; expected LRU, Random, SRRIP or BRRIP"
     )
