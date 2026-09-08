@@ -1,0 +1,25 @@
+# Appended to src/mem/cache/replacement_policies/ReplacementPolicies.py in the
+# gem5 tree by scripts/install_policies.sh.
+#
+# Registering the SimObject here is what makes the C++ class reachable from a
+# Python config. Forgetting it produces a "SimObject not found" error at
+# config time rather than a build failure, which is a confusing place to
+# start debugging.
+
+
+class SRRIPRP(BaseReplacementPolicy):
+    type = "SRRIPRP"
+    cxx_class = "gem5::replacement_policy::SRRIP"
+    cxx_header = "mem/cache/replacement_policies/srrip_rp.hh"
+    num_bits = Param.Int(2, "Number of bits in the RRPV counter")
+
+
+class BRRIPCustomRP(SRRIPRP):
+    type = "BRRIPCustomRP"
+    cxx_class = "gem5::replacement_policy::BRRIPCustom"
+    cxx_header = "mem/cache/replacement_policies/brrip_custom_rp.hh"
+    btp = Param.Percent(
+        3,
+        "Bimodal throttle: percentage of insertions given the short "
+        "re-reference interval instead of the distant one",
+    )
