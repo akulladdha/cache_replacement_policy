@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copy the SRRIP and BRRIP sources into a gem5 checkout, register them as
+# Copy the SRRIP, BRRIP and DRRIP sources into a gem5 checkout, register them as
 # SimObjects, add them to the build, and rebuild gem5.
 #
 # The script is idempotent: running it twice does not duplicate the
@@ -30,6 +30,8 @@ cp "$REPO_ROOT/src/srrip_rp.hh"        "$RP_DIR/srrip_rp.hh"
 cp "$REPO_ROOT/src/srrip_rp.cc"        "$RP_DIR/srrip_rp.cc"
 cp "$REPO_ROOT/src/brrip_custom_rp.hh" "$RP_DIR/brrip_custom_rp.hh"
 cp "$REPO_ROOT/src/brrip_custom_rp.cc" "$RP_DIR/brrip_custom_rp.cc"
+cp "$REPO_ROOT/src/drrip_custom_rp.hh" "$RP_DIR/drrip_custom_rp.hh"
+cp "$REPO_ROOT/src/drrip_custom_rp.cc" "$RP_DIR/drrip_custom_rp.cc"
 
 # --- Registration 1: the SimObject declarations. ---------------------------
 PY="$RP_DIR/ReplacementPolicies.py"
@@ -54,24 +56,37 @@ fi
     echo "# --- srrip-gem5 project additions ---"
     cat "$REPO_ROOT/src/ReplacementPolicies.py.snippet"
 } >> "$PY"
-echo "==> registered SRRIPRP and BRRIPCustomRP in ReplacementPolicies.py"
+echo "==> registered SRRIPRP, BRRIPCustomRP and DRRIPCustomRP in ReplacementPolicies.py"
 
 # --- Registration 2: the build. --------------------------------------------
 # Two edits: add the SimObject names to the SimObject() call so the params
 # headers get generated, and add each .cc as a Source so it gets compiled.
 SC="$RP_DIR/SConscript"
 python3 - "$SC" <<'PYEOF'
+import re
 import sys
 
 path = sys.argv[1]
 text = open(path).read()
 
-missing = [n for n in ("SRRIPRP", "BRRIPCustomRP") if f"'{n}'" not in text]
+# Insert any missing names just before the closing bracket of the
+# sim_objects list. Anchoring on the bracket rather than on the last upstream
+# name matters: after a first install the list no longer ends in an upstream
+# name, and a policy added later would otherwise be silently left out.
+names = ("SRRIPRP", "BRRIPCustomRP", "DRRIPCustomRP")
+missing = [n for n in names if f"'{n}'" not in text]
 if missing:
     added = "".join(f", '{n}'" for n in missing)
-    text = text.replace("'WeightedLRURP'])", "'WeightedLRURP'" + added + "])", 1)
+    text, count = re.subn(
+        r"(sim_objects=\[[^\]]*?)\s*\]",
+        lambda m: m.group(1) + added + "]",
+        text,
+        count=1,
+    )
+    if count != 1:
+        sys.exit("error: could not find the sim_objects list in " + path)
 
-for src in ("srrip_rp.cc", "brrip_custom_rp.cc"):
+for src in ("srrip_rp.cc", "brrip_custom_rp.cc", "drrip_custom_rp.cc"):
     line = f"Source('{src}')\n"
     if line not in text:
         text = text.replace(

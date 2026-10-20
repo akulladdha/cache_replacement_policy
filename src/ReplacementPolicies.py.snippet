@@ -23,3 +23,15 @@ class BRRIPCustomRP(SRRIPRP):
         "Bimodal throttle: percentage of insertions given the short "
         "re-reference interval instead of the distant one",
     )
+
+
+class DRRIPCustomRP(BRRIPCustomRP):
+    type = "DRRIPCustomRP"
+    cxx_class = "gem5::replacement_policy::DRRIPCustom"
+    cxx_header = "mem/cache/replacement_policies/drrip_custom_rp.hh"
+    constituency_size = Param.Unsigned(
+        32,
+        "Sets per constituency. Each constituency holds one SRRIP leader and "
+        "one BRRIP leader, so a 1024-set cache gets 32 of each",
+    )
+    psel_bits = Param.Unsigned(10, "Width of the policy selector counter")

@@ -27,6 +27,7 @@ import sys
 import m5
 from m5.objects import (
     BRRIPRP,
+    DRRIPRP,
     LRURP,
     RandomRP,
 )
@@ -48,18 +49,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hierarchy import ConfigurableL2Hierarchy
 
 
-def build_replacement_policy(name: str, num_bits: int, btp: int):
+def build_replacement_policy(args):
     """
     Map a --policy string onto a replacement policy SimObject.
 
-    SRRIPRP and BRRIPCustomRP are the two policies implemented for this
-    project. LRURP and RandomRP are gem5 built-ins: LRU is the baseline the
-    plot compares against, and Random exists purely so the harness can be
-    validated. If LRU and Random produce identical miss counts, the policy
-    parameter is not reaching the cache and every later result is worthless.
+    SRRIPRP, BRRIPCustomRP and DRRIPCustomRP are the three policies
+    implemented for this project. LRURP and RandomRP are gem5 built-ins: LRU
+    is the baseline the plot compares against, and Random exists purely so
+    the harness can be validated. If LRU and Random produce identical miss
+    counts, the policy parameter is not reaching the cache and every later
+    result is worthless.
     """
-    name = name.upper()
-    if name in ("SRRIP", "BRRIP"):
+    name = args.policy.upper()
+    num_bits = args.num_bits
+    btp = args.btp
+    if name in ("SRRIP", "BRRIP", "DRRIP"):
         # Imported lazily so that LRU and Random still work against a stock
         # gem5 binary. If these names are missing, the policies were never
         # compiled in and the error below says so directly instead of
@@ -67,17 +71,25 @@ def build_replacement_policy(name: str, num_bits: int, btp: int):
         try:
             from m5.objects import (
                 BRRIPCustomRP,
+                DRRIPCustomRP,
                 SRRIPRP,
             )
         except ImportError as exc:
             raise ImportError(
-                "SRRIPRP/BRRIPCustomRP are not in this gem5 binary. Run "
-                "scripts/install_policies.sh to copy the sources into the "
-                "gem5 tree and rebuild."
+                "SRRIPRP/BRRIPCustomRP/DRRIPCustomRP are not in this gem5 "
+                "binary. Run scripts/install_policies.sh to copy the sources "
+                "into the gem5 tree and rebuild."
             ) from exc
         if name == "SRRIP":
             return SRRIPRP(num_bits=num_bits)
-        return BRRIPCustomRP(num_bits=num_bits, btp=btp)
+        if name == "BRRIP":
+            return BRRIPCustomRP(num_bits=num_bits, btp=btp)
+        return DRRIPCustomRP(
+            num_bits=num_bits,
+            btp=btp,
+            constituency_size=args.constituency_size,
+            psel_bits=args.psel_bits,
+        )
     if name == "LRU":
         return LRURP()
     if name == "RANDOM":
@@ -99,8 +111,29 @@ def build_replacement_policy(name: str, num_bits: int, btp: int):
             btp=100 if name == "SRRIP_REF" else btp,
             hit_priority=True,
         )
+    if name == "DRRIP_REF":
+        # gem5's own DRRIP, built on its generic DuelingRP. It is not the
+        # same algorithm as mine in one respect: it keeps a separate RRIP
+        # state per line for each of the two competing policies, where the
+        # paper (and DRRIPCustom) keeps one RRPV and varies only insertion.
+        # So agreement here is a sanity check on behaviour, not a bit-exact
+        # comparison like the SRRIP and BRRIP references.
+        #
+        # gem5 counts the constituency in cache entries and allocates entries
+        # one set at a time, so "one leader set per team in every C sets"
+        # becomes C * assoc entries with a team of assoc entries.
+        return DRRIPRP(
+            constituency_size=args.constituency_size * args.l2_assoc,
+            team_size=args.l2_assoc,
+            replacement_policy_a=BRRIPRP(
+                num_bits=num_bits, btp=btp, hit_priority=True
+            ),
+            replacement_policy_b=BRRIPRP(
+                num_bits=num_bits, btp=100, hit_priority=True
+            ),
+        )
     raise ValueError(
-        f"unknown policy {name!r}; expected LRU, Random, SRRIP or BRRIP"
+        f"unknown policy {name!r}; expected LRU, Random, SRRIP, BRRIP or DRRIP"
     )
 
 
@@ -109,7 +142,7 @@ def parse_args():
     parser.add_argument(
         "--policy",
         required=True,
-        help="L2 replacement policy: LRU, Random, SRRIP or BRRIP",
+        help="L2 replacement policy: LRU, Random, SRRIP, BRRIP or DRRIP",
     )
     parser.add_argument(
         "--binary", required=True, help="path to the statically linked binary"
@@ -142,6 +175,19 @@ def parse_args():
         "near-immediate RRPV instead of distant",
     )
     parser.add_argument(
+        "--constituency-size",
+        type=int,
+        default=32,
+        help="DRRIP: sets per constituency, each holding one SRRIP leader "
+        "and one BRRIP leader",
+    )
+    parser.add_argument(
+        "--psel-bits",
+        type=int,
+        default=10,
+        help="DRRIP: width of the policy selector counter",
+    )
+    parser.add_argument(
         "--warmup-insts",
         type=int,
         default=0,
@@ -155,9 +201,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    replacement_policy = build_replacement_policy(
-        args.policy, args.num_bits, args.btp
-    )
+    replacement_policy = build_replacement_policy(args)
 
     warmup = args.warmup_insts > 0
 
