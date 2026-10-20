@@ -2,8 +2,9 @@
 #
 # Run the full policy sweep.
 #
-# For each of LRU, SRRIP and BRRIP: chase.c across a range of working-set
-# sizes, plus stream.c and mixed.c at one size each. The working-set points
+# For each of LRU, SRRIP, BRRIP and DRRIP: chase.c across a range of
+# working-set sizes, stream.c at one size, mixed.c across hot-set sizes, and
+# phases.c across phase lengths. The working-set points
 # are clustered around the 1 MiB L2 capacity, because that is where the
 # policies actually diverge; far below capacity everything hits and far above
 # capacity everything misses.
@@ -14,6 +15,7 @@
 # Environment overrides:
 #     GEM5_ROOT     gem5 checkout                    (default ~/gem5)
 #     GEM5_BIN      gem5 binary                      (default $GEM5_ROOT/build/ALL/gem5.opt)
+#     POLICIES      space-separated policy list      (default LRU SRRIP BRRIP DRRIP)
 #     L2_SIZE       L2 cache size                    (default 1MiB)
 #     L2_ASSOC      L2 associativity                 (default 16)
 #     WARMUP_INSTS  atomic-core warmup instructions  (default 0, meaning off)
@@ -47,7 +49,7 @@ if [[ ! -x "$BIN_DIR/chase" ]]; then
     exit 1
 fi
 
-POLICIES=(LRU SRRIP BRRIP)
+POLICIES=(${POLICIES:-LRU SRRIP BRRIP DRRIP})
 # Working sets in KiB.
 #
 # The spacing is deliberately uneven. A first pass on evenly spaced log points
@@ -67,6 +69,10 @@ CHASE_WS=(
 # These are all comfortably smaller than the 1 MiB L2, so a policy that
 # protects them can hold the whole hot set resident across the scan.
 MIXED_HOT=(64 128 256 512)
+
+# Phase lengths for phases.c, in thousands of chase steps per phase. Each
+# must divide 3200 so the total work is identical at every point.
+PHASE_KSTEPS=(25 50 100 200 400 800)
 
 mkdir -p "$OUTDIR"
 
@@ -107,6 +113,16 @@ for POLICY in "${POLICIES[@]}"; do
     # protects the hot set for free.
     for hot in "${MIXED_HOT[@]}"; do
         emit "mixed-${POLICY}-${hot}" "$BIN_DIR/mixed" 2048 "$hot" 10 4
+    done
+
+    # phases.c: alternate a 1.25 MiB list (thrashes, BRRIP wins) with a
+    # 768 KiB list (fits, SRRIP wins). The swept variable is phase length,
+    # in thousands of chase steps, with the total held at 3.2M steps so
+    # every point does the same work. Short phases test how quickly the
+    # duel can follow a change; long ones give it time to settle.
+    for kstep in "${PHASE_KSTEPS[@]}"; do
+        emit "phases-${POLICY}-${kstep}" "$BIN_DIR/phases" 1280 768 \
+            "$((kstep * 1000))" "$((3200 / kstep))"
     done
 done
 

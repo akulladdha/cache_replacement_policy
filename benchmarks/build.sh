@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build all three microbenchmarks.
+# Build all four microbenchmarks.
 #
 # -static is not optional. gem5 Syscall Emulation mode fakes the operating
 # system instead of booting one, and its handling of the dynamic loader is
@@ -12,7 +12,7 @@ CC=${CC:-gcc}
 CFLAGS=${CFLAGS:--O2 -static -Wall}
 
 mkdir -p bin
-for src in stream.c chase.c mixed.c; do
+for src in stream.c chase.c mixed.c phases.c; do
     out="bin/${src%.c}"
     echo "  CC  $src -> $out"
     $CC $CFLAGS -o "$out" "$src"

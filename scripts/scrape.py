@@ -30,9 +30,24 @@ STAT_ACCESSES = "board.cache_hierarchy.l2-cache-0.overallAccesses::total"
 STAT_INSTS = "simInsts"
 STAT_SECONDS = "simSeconds"
 
-WANTED = {STAT_MISSES, STAT_ACCESSES, STAT_INSTS, STAT_SECONDS}
+# DRRIPCustom's own counters. Present only in DRRIP runs; blank otherwise.
+STAT_RP = "board.cache_hierarchy.l2-cache-0.replacement_policy."
+STAT_PSEL = STAT_RP + "psel"
+STAT_FOLLOWER_BRRIP = STAT_RP + "followerBRRIPFraction"
 
-# Directory names look like "chase-BRRIP-2048" or "mixed-LRU-8192".
+WANTED = {
+    STAT_MISSES,
+    STAT_ACCESSES,
+    STAT_INSTS,
+    STAT_SECONDS,
+    STAT_PSEL,
+    STAT_FOLLOWER_BRRIP,
+}
+
+# Directory names look like "chase-BRRIP-2048" or "mixed-LRU-8192". The
+# number is the swept variable: working set for chase and stream, hot-set
+# size for mixed, and thousands of steps per phase for phases. It lands in
+# the working_set_kb column regardless, so read that column per benchmark.
 DIRNAME_RE = re.compile(r"^(?P<bench>[a-z]+)-(?P<policy>[A-Za-z]+)-(?P<ws>\d+)$")
 
 
@@ -69,9 +84,10 @@ def parse_config(path):
 
     def walk(node):
         if isinstance(node, dict):
-            if node.get("name") == "l2-cache-0" or (
-                "assoc" in node and "replacement_policy" in node
-            ):
+            # Match on the name only. The L1s also carry "assoc" and
+            # "replacement_policy" and come first in the file, so matching on
+            # those keys recorded the L1 geometry in the L2 columns.
+            if node.get("name") == "l2-cache-0":
                 info.setdefault("l2_assoc", node.get("assoc"))
                 info.setdefault("l2_size", node.get("size"))
                 policy = node.get("replacement_policy")
@@ -149,6 +165,11 @@ def main():
                 "mpki": round(misses / (insts / 1000.0), 4),
                 "miss_rate": round(misses / accesses, 6) if accesses else "",
                 "sim_seconds": stats.get(STAT_SECONDS, ""),
+                # DRRIP only: where the selector ended, and what share of
+                # follower-set insertions went the BRRIP way. The second is
+                # the direct answer to "which policy did the duel pick".
+                "drrip_psel": stats.get(STAT_PSEL, ""),
+                "drrip_follower_brrip": stats.get(STAT_FOLLOWER_BRRIP, ""),
             }
         )
 
