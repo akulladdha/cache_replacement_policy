@@ -597,6 +597,88 @@ def draw_drrip(rows, out_path, capacity_kb, title_suffix=""):
     print(f"wrote {out_path}")
 
 
+def draw_bfs(rows, out_path, capacity_kb):
+    """
+    GAPBS BFS across graph sizes, the one real workload.
+
+    Left: L2 miss rate. Middle: MPKI. Right: which way DRRIP's followers
+    inserted, read from its own counters, so the duel's choice on a mixed
+    access pattern can be checked against which static policy actually won.
+    """
+    series = series_for(rows, "bfs")
+    if not series:
+        print("error: no bfs rows in the data", file=sys.stderr)
+        return
+
+    fig, (ax_rate, ax_mpki, ax_pick) = plt.subplots(
+        1, 3, figsize=(16.5, 5.0), constrained_layout=True
+    )
+
+    for axis, index, ylabel in (
+        (ax_rate, 1, "L2 miss rate"),
+        (ax_mpki, 2, "L2 MPKI"),
+    ):
+        for policy in ORDER:
+            if policy not in series:
+                continue
+            axis.plot(
+                series[policy][0],
+                series[policy][index],
+                color=STYLE[policy]["color"],
+                marker=STYLE[policy]["marker"],
+                markersize=5.5,
+                linewidth=1.9,
+                label=policy,
+            )
+        axis.set_ylabel(ylabel)
+
+    picked = sorted(
+        (int(r["working_set_kb"]), 100.0 * float(r["drrip_follower_brrip"]))
+        for r in rows
+        if r["benchmark"] == "bfs"
+        and r["policy"] == "DRRIP"
+        and r.get("drrip_follower_brrip") not in (None, "", "nan")
+    )
+    if picked:
+        ax_pick.plot(
+            [p[0] for p in picked],
+            [p[1] for p in picked],
+            color=STYLE["DRRIP"]["color"],
+            marker=STYLE["DRRIP"]["marker"],
+            markersize=5.5,
+            linewidth=1.9,
+        )
+    ax_pick.set_ylim(-4, 104)
+    ax_pick.set_ylabel("Follower insertions made the BRRIP way (%)")
+    ax_pick.set_title("Which policy DRRIP's duel picked", fontsize=11)
+
+    for axis in (ax_rate, ax_mpki, ax_pick):
+        axis.axvline(
+            capacity_kb,
+            color="#adb5bd",
+            linestyle="--",
+            linewidth=1.2,
+            zorder=0,
+        )
+        axis.set_xscale("log", base=2)
+        axis.xaxis.set_major_formatter(FuncFormatter(format_kb))
+        axis.set_xlabel("Graph size on disk (log scale)")
+        axis.grid(True, alpha=0.25, linewidth=0.7)
+        axis.set_axisbelow(True)
+    ax_rate.legend(frameon=False)
+
+    fig.suptitle(
+        "GAPBS BFS on Kronecker graphs, scales 10 to 18 "
+        "(warmed; 4 measured trials per run)",
+        fontsize=12,
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"wrote {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-i", "--input", default="results/data.csv")
@@ -612,9 +694,17 @@ def main():
     parser.add_argument(
         "--no-bars", action="store_true", help="skip the bar chart"
     )
+    parser.add_argument(
+        "--bfs",
+        action="store_true",
+        help="draw only the GAPBS BFS figure from --input",
+    )
     args = parser.parse_args()
 
     rows = read_rows(args.input)
+    if args.bfs:
+        draw_bfs(rows, args.output, args.capacity_kb)
+        return 0
     crossover, _closes = draw(
         rows,
         args.output,

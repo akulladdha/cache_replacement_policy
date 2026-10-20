@@ -350,3 +350,32 @@ mixed 64/128/256 warm == cold to 4 decimals: the program finishes inside the
 4M-instruction warmup, so stats never reset and the "warm" number is the cold
 one. Pre-existing, not DRRIP-related. Only mixed 512 actually got a measured
 window. Worth fixing by scaling warmup per benchmark if it matters.
+
+## GAPBS BFS (2026-10-20)
+
+- GAPBS commit 941462c, `make bfs converter SERIAL=1 CXX_FLAGS="-std=c++11
+  -O3 -Wall -static"`. Overriding CXX_FLAGS is how -static gets in; SERIAL=1
+  drops -fopenmp. Lots of "ignoring #pragma omp" warnings, harmless.
+- Graphs generated natively: `converter -g <scale> -b kron<scale>.sg`,
+  scales 10-18, 90 KB to 32 MB. Lives in ~/srrip-work/graphs, not the repo.
+- argparse trap: `--bench-arg -f` fails ("expected one argument") because
+  -f looks like a flag. Must use `--bench-arg=-f`.
+- SE mode reads the .sg file in the emulator, not through simulated loads,
+  so loading is only ~1.1M simulated insts at scale 16 and leaves the graph
+  cold in the caches.
+- Warmup: calibrate with `-n 1` per graph (LRU, timing), take simInsts, then
+  run `-n 5 --warmup-insts <that>`. Measured window = 4 trials.
+- simInsts is NOT exactly policy-independent: up to ~150 insts apart out of
+  5-74M (<0.002%) from 1.8 MB up, identical below. Cause: GAPBS times each
+  trial and printf's the result; simulated time differs by policy, so the
+  float formatting executes slightly different code. BFS work itself uses
+  fixed-seed sources and is identical. Harmless, and MPKI uses each run's own
+  insts, but it means one calibration can be off by a few hundred insts for
+  other policies. Irrelevant at this scale.
+- 36 runs + 9 calibrations, 149 s at 12 parallel.
+- Headline: 3.7 MB graph, LRU 0.2593, SRRIP 0.2358, BRRIP 0.2091, DRRIP
+  0.2099 (followers 100% BRRIP). 31.8 MB: BRRIP worst (0.7518 vs 0.7487),
+  DRRIP flips to SRRIP (0.7489). Worst gap to best on BFS: BRRIP 0.0031,
+  DRRIP 0.0053, SRRIP 0.0426, LRU 0.0502.
+- Microbenchmark magnitudes (74% vs LRU) shrink to ~19% here: hub vertices
+  stay resident under every policy.
