@@ -116,7 +116,7 @@ for POLICY in "${POLICIES[@]}"; do
     done
 
     # phases.c: alternate a 1.25 MiB list (thrashes, BRRIP wins) with a
-    # 768 KiB list (fits, SRRIP wins). The swept variable is phase length,
+    # 768 KiB list (fits). The swept variable is phase length,
     # in thousands of chase steps, with the total held at 3.2M steps so
     # every point does the same work. Short phases test how quickly the
     # duel can follow a change; long ones give it time to settle.

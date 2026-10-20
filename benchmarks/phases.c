@@ -18,11 +18,17 @@
  *     eviction candidate, so a working set that has just changed takes many
  *     laps to build back up.
  *
- * So any static choice is wrong for half the run. This is the workload set
- * dueling exists for: a policy that can switch at run time should beat both
- * static policies outright, not merely match the better one. On chase.c and
- * mixed.c, whose behaviour does not change during the run, the best DRRIP
- * can do is track whichever static policy suits the whole run.
+ * That was the design intent: a workload where any static choice is wrong
+ * for half the run, so a policy that switches at run time could beat both.
+ *
+ * The measurement did not bear out the second half. BRRIP rebuilds the
+ * small list quickly enough that it loses almost nothing in the fitting
+ * phase, so BRRIP wins outright at every phase length and DRRIP, correctly,
+ * runs BRRIP in about 95 percent of follower insertions. Kept in the sweep
+ * because it is still a useful result: a phase change alone does not create
+ * a regime where SRRIP wins. The fitting phase has to contain something
+ * BRRIP is actually bad at, such as mixed.c's hot set under a streaming
+ * scan. NOTES.md records an exploratory run of exactly that.
  */
 
 #include <stdio.h>

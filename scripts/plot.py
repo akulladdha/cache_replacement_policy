@@ -33,10 +33,11 @@ STYLE = {
     "LRU": {"color": "#4c6ef5", "marker": "o", "label": "LRU"},
     "SRRIP": {"color": "#e8590c", "marker": "s", "label": "SRRIP"},
     "BRRIP": {"color": "#2f9e44", "marker": "^", "label": "BRRIP"},
+    "DRRIP": {"color": "#9c36b5", "marker": "D", "label": "DRRIP"},
     "Random": {"color": "#868e96", "marker": "x", "label": "Random"},
 }
 
-ORDER = ["LRU", "SRRIP", "BRRIP", "Random"]
+ORDER = ["LRU", "SRRIP", "BRRIP", "DRRIP", "Random"]
 
 
 def read_rows(path):
@@ -442,6 +443,160 @@ def draw_improvement(rows, out_path, capacity_kb, benchmark="chase"):
     print(f"wrote {out_path}")
 
 
+def draw_drrip(rows, out_path, capacity_kb, title_suffix=""):
+    """
+    What set dueling actually did.
+
+    Left: on chase.c, the share of follower-set insertions DRRIP made the
+    BRRIP way. This is the duel's verdict at each working-set size, read out
+    of the policy's own counters rather than inferred from miss rates.
+
+    Middle: DRRIP's miss rate minus the better of SRRIP and BRRIP at the same
+    point. Above zero is the price of dueling: the leader sets keep running
+    the losing policy, and the followers take time to switch. Below zero
+    would mean DRRIP beat both.
+
+    Right: phases.c, where the workload alternates between a regime that
+    favours BRRIP and one that favours SRRIP. Here a static policy is wrong
+    for half the run, and dueling has room to beat both.
+    """
+    chase = series_for(rows, "chase")
+    phases = series_for(rows, "phases")
+    if "DRRIP" not in chase:
+        print("note: no DRRIP rows, skipping the DRRIP figure")
+        return
+
+    fig, (ax_pick, ax_cost, ax_phase) = plt.subplots(
+        1, 3, figsize=(16.5, 5.0), constrained_layout=True
+    )
+
+    # Left: which policy the followers used.
+    picked = sorted(
+        (int(r["working_set_kb"]), float(r["drrip_follower_brrip"]))
+        for r in rows
+        if r["benchmark"] == "chase"
+        and r["policy"] == "DRRIP"
+        and r.get("drrip_follower_brrip") not in (None, "", "nan")
+    )
+    if picked:
+        ax_pick.plot(
+            [p[0] for p in picked],
+            [100.0 * p[1] for p in picked],
+            color=STYLE["DRRIP"]["color"],
+            marker=STYLE["DRRIP"]["marker"],
+            markersize=5.5,
+            linewidth=1.9,
+        )
+        # Where nearly everything hits there are too few misses for PSEL to
+        # move far from where it started, and the split is noise rather than
+        # a decision. Draw those points hollow so nobody reads them as one.
+        drrip_rate = dict(zip(chase["DRRIP"][0], chase["DRRIP"][1]))
+        idle = [p for p in picked if drrip_rate.get(p[0], 1.0) < 0.05]
+        if idle:
+            ax_pick.plot(
+                [p[0] for p in idle],
+                [100.0 * p[1] for p in idle],
+                linestyle="none",
+                marker=STYLE["DRRIP"]["marker"],
+                markersize=7,
+                markerfacecolor="white",
+                markeredgecolor=STYLE["DRRIP"]["color"],
+            )
+            ax_pick.annotate(
+                "hollow: under 5% miss rate,\n"
+                "too few misses to decide anything",
+                xy=(0.03, 0.42),
+                xycoords="axes fraction",
+                fontsize=8,
+                color="#495057",
+            )
+    ax_pick.set_ylim(-4, 104)
+    ax_pick.set_ylabel("Follower insertions made the BRRIP way (%)")
+    ax_pick.set_title("chase.c: which policy the duel picked", fontsize=11)
+
+    # Middle: cost of dueling against the better static policy.
+    rate = {p: dict(zip(chase[p][0], chase[p][1])) for p in chase}
+    xs = sorted(set(rate["DRRIP"]) & set(rate["SRRIP"]) & set(rate["BRRIP"]))
+    gap = [
+        rate["DRRIP"][x] - min(rate["SRRIP"][x], rate["BRRIP"][x]) for x in xs
+    ]
+    ax_cost.plot(
+        xs,
+        gap,
+        color=STYLE["DRRIP"]["color"],
+        marker=STYLE["DRRIP"]["marker"],
+        markersize=5.5,
+        linewidth=1.9,
+        label="DRRIP minus best static",
+    )
+    ax_cost.plot(
+        xs,
+        [rate["SRRIP"][x] - rate["BRRIP"][x] for x in xs],
+        color="#adb5bd",
+        linewidth=1.4,
+        linestyle="-.",
+        label="SRRIP minus BRRIP, for scale",
+    )
+    ax_cost.axhline(0, color="#495057", linewidth=1.0, zorder=1)
+    ax_cost.set_ylabel("Difference in L2 miss rate")
+    ax_cost.set_title(
+        "chase.c: DRRIP against the better static policy", fontsize=11
+    )
+    ax_cost.legend(frameon=False, loc="upper right", fontsize=9)
+
+    for axis in (ax_pick, ax_cost):
+        axis.axvline(
+            capacity_kb,
+            color="#adb5bd",
+            linestyle="--",
+            linewidth=1.2,
+            zorder=0,
+        )
+        axis.set_xscale("log", base=2)
+        axis.xaxis.set_major_formatter(FuncFormatter(format_kb))
+        axis.set_xlabel("Working set (log scale)")
+
+    # Right: the phase-changing workload.
+    for policy in ORDER:
+        if policy not in phases:
+            continue
+        pxs, prates, _ = phases[policy]
+        ax_phase.plot(
+            pxs,
+            prates,
+            color=STYLE[policy]["color"],
+            marker=STYLE[policy]["marker"],
+            markersize=5.5,
+            linewidth=1.9,
+            label=policy,
+        )
+    ax_phase.set_xscale("log", base=2)
+    ax_phase.xaxis.set_major_formatter(
+        FuncFormatter(lambda v, _p: f"{v:g}k")
+    )
+    ax_phase.set_xlabel("Chase steps per phase (log scale)")
+    ax_phase.set_ylabel("L2 miss rate")
+    ax_phase.set_title(
+        "phases.c: 1.25 MiB thrash alternating with 768 KiB fit",
+        fontsize=11,
+    )
+    ax_phase.legend(frameon=False, fontsize=9)
+
+    for axis in (ax_pick, ax_cost, ax_phase):
+        axis.grid(True, alpha=0.25, linewidth=0.7)
+        axis.set_axisbelow(True)
+
+    fig.suptitle(
+        f"DRRIP: set dueling between SRRIP and BRRIP{title_suffix}",
+        fontsize=12,
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"wrote {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-i", "--input", default="results/data.csv")
@@ -450,6 +605,7 @@ def main():
     parser.add_argument(
         "--improvement-output", default="plots/brrip_improvement.png"
     )
+    parser.add_argument("--drrip-output", default="plots/drrip.png")
     parser.add_argument("--capacity-kb", type=int, default=1024)
     parser.add_argument("--benchmark", default="chase")
     parser.add_argument("--title-suffix", default="")
@@ -471,6 +627,7 @@ def main():
     draw_improvement(
         rows, args.improvement_output, args.capacity_kb, args.benchmark
     )
+    draw_drrip(rows, args.drrip_output, args.capacity_kb, args.title_suffix)
 
     if crossover is None:
         print("note: SRRIP and BRRIP do not cross in this dataset")
