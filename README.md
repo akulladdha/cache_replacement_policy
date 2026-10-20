@@ -1,42 +1,60 @@
 # CPU Cache Replacement Policies in gem5
 
-Two published cache replacement policies, SRRIP and BRRIP (Static and Bimodal
-Re-Reference Interval Prediction), implemented in gem5's C++ memory hierarchy
-and measured across a sweep of working-set sizes to find the point where one
-overtakes the other.
+Three published cache replacement policies, SRRIP, BRRIP and DRRIP (Static,
+Bimodal and Dynamic Re-Reference Interval Prediction), implemented in gem5's
+C++ memory hierarchy. They are measured across a sweep of working-set sizes
+to find where SRRIP and BRRIP cross over, and whether DRRIP's run-time set
+dueling picks the right side of that crossover on its own.
 
 ## TL;DR
 
-**What was built.** SRRIP and BRRIP as gem5 replacement policies in C++
-(`SRRIPRP` and `BRRIPCustomRP`), a config harness that exposes the L2 policy
-as a parameter, and three microbenchmarks. 72 sweep points, run twice, cold
-and warmed, for 144 simulations total. DRRIP is **not** built; its runtime
-set-dueling is deliberately out of scope.
+**What was built.** SRRIP, BRRIP and DRRIP as gem5 replacement policies in C++
+(`SRRIPRP`, `BRRIPCustomRP` and `DRRIPCustomRP`), a config harness that
+exposes the L2 policy as a parameter, and four microbenchmarks. 120 sweep
+points, run twice, cold and warmed, for 240 simulations total.
 
 **The headline number.** At a working set 12 percent larger than the 1 MiB
-L2, BRRIP misses on 25.7 percent of L2 accesses where SRRIP misses on 78.5
-percent and LRU on 99.4 percent. That is a 3.9x reduction in misses from
-changing one line of insertion logic.
+L2, BRRIP misses on 25.9 percent of L2 accesses where SRRIP misses on 78.4
+percent and LRU on 99.4 percent. That is a 3.8x reduction in misses against
+LRU from changing one line of insertion logic.
+
+**DRRIP picks the right policy without being told.** Past capacity on the
+pointer chase, its follower sets insert the BRRIP way 95 to 99 percent of the
+time and it misses on 27.7 percent of accesses at that same 1.125 MiB point.
+On `mixed.c`, where BRRIP is the wrong choice, they insert the SRRIP way about
+80 percent of the time. Across every workload DRRIP stays within 2.1
+percentage points of whichever static policy is better at that point. That gap
+is the price of dueling, because the sampled leader sets keep running the
+losing policy.
 
 **The crossover.** BRRIP overtakes SRRIP right at cache capacity, around
 1.0 MiB, and the advantage is gone again by about 2.2 MiB. Past roughly 3 MiB
-all three policies sit within 0.0011 of each other, because at several times
+all four policies sit within 0.0011 of each other, because at several times
 capacity there is nothing left for any eviction decision to protect.
 
 **The other side of it.** On `mixed.c`, where a small hot set genuinely is
 worth keeping, BRRIP is the *worst* of the three and gets worse as the hot set
 grows: 0.6695 against LRU's 0.6122 at a 512 KiB hot set. Neither static policy
 wins everywhere, and the boundary sits at a workload property nothing knows
-before run time. That is precisely the argument for DRRIP.
+before run time. That is precisely the argument for DRRIP, and DRRIP lands at
+0.6245 there, next to SRRIP's 0.6189 rather than BRRIP's 0.6695.
 
-**Correctness.** Miss counts are bit-identical to gem5's own RRIP
-implementation on both workloads. Separately, LRU and Random produce different
-miss counts at identical instruction counts, which proves the policy parameter
-actually reaches the cache rather than being silently ignored.
+**What DRRIP did not show.** It never clearly beats *both* static policies.
+`phases.c` was written to make that happen by alternating a thrashing phase
+with a fitting one, but BRRIP turned out to lose almost nothing in the fitting
+phase. It won outright at every phase length, and DRRIP followed it. Stated
+plainly in [the DRRIP section](#drrip-set-dueling).
+
+**Correctness.** SRRIP and BRRIP miss counts are bit-identical to gem5's own
+RRIP implementation on both workloads. DRRIP is within 1.2 percent of gem5's
+DRRIP, which is a slightly different algorithm, so exact agreement is not
+expected. LRU and Random produce different miss counts at identical instruction
+counts, which proves the policy parameter actually reaches the cache rather
+than being silently ignored.
 
 **Warmup.** An atomic-core warmup with a stats reset at the switch changes
 absolute miss rates by more than tenfold below capacity, but moves the
-SRRIP-minus-BRRIP gap by at most 0.0071 anywhere. The cold-cache deltas the
+SRRIP-minus-BRRIP gap by at most 0.0086 anywhere. The cold-cache deltas the
 crossover rests on hold up.
 
 **Setup.** Two-level hierarchy with the policy at L2, which is the LLC here.
@@ -49,12 +67,12 @@ plausible, meaningless numbers: gcc collapsing repeated read passes at `-O2`,
 and a sequentially scanned hot set that made LRU and SRRIP take bit-identical
 eviction decisions. Details in [`NOTES.md`](NOTES.md).
 
-![L2 miss rate and MPKI against working-set size for LRU, SRRIP and BRRIP](plots/crossover.png)
+![L2 miss rate and MPKI against working-set size for LRU, SRRIP, BRRIP and DRRIP](plots/crossover.png)
 
 The workload is a pointer chase over a randomly permuted list, run against a
 1 MiB 16-way L2 with the policy under test installed at that level. Reuse
 distance equals the working set, so below capacity every lap hits and all
-three policies are indistinguishable. Past capacity a line is evicted before
+four policies are indistinguishable. Past capacity a line is evicted before
 the chase laps back to it, and the policies separate hard.
 
 The shape is the argument. LRU falls off a cliff the moment the working set
@@ -63,8 +81,10 @@ evicts precisely the line that will be needed soonest. SRRIP degrades more
 gently through the transition, which is its scan resistance working, but it
 converges back onto LRU by 2 MiB because scan resistance is not thrash
 resistance. Only BRRIP holds a low miss rate past capacity, and only over a
-narrow band. **No one of these policies is right everywhere, and which one
-wins depends on a property of the workload that is not known until run time.**
+narrow band. **No one static policy is right everywhere, and which one wins
+depends on a property of the workload that is not known until run time.**
+DRRIP, the purple line, is the run-time answer to that, and it sits just above
+BRRIP through the whole transition.
 
 ## The size of the win
 
@@ -76,8 +96,8 @@ is the quantity the whole project is about.
 
 BRRIP's advantage peaks immediately past capacity and then collapses. At a
 1.125 MiB working set it avoids 74 percent of LRU's L2 misses and 67 percent
-of SRRIP's, worth 271 MPKI against LRU. One step further out the gain is
-already down to 60 percent, by 1.75 MiB it is under 10 percent, and by
+of SRRIP's, worth 270 MPKI against LRU. One step further out the gain is
+already down to 60 percent, by 1.75 MiB it is about 10 percent, and by
 2.3 MiB it is gone. Everything BRRIP is good for happens inside roughly one
 doubling of the cache size.
 
@@ -92,24 +112,91 @@ region where it does essentially nothing.
 That narrowness is the argument for adaptivity rather than against BRRIP. A
 policy with a 74 percent win available in one band and nothing outside it is
 exactly the case for selecting between policies at run time instead of picking
-one at design time.
+one at design time. DRRIP keeps 72 of those 74 points at 1.125 MiB.
+
+## DRRIP: set dueling
+
+![DRRIP's choice of policy, its cost against the better static policy, and the phase-changing workload](plots/drrip.png)
+
+**How it works.** A few sets in the L2 always insert the SRRIP way and the same
+number always insert the BRRIP way. With the defaults that is 32 of each out of
+1024 sets, one pair in every 32-set constituency. Leader positions follow the
+paper's complement-select pattern, so they move from one constituency to the
+next and a strided access pattern cannot land on every leader of one policy. A
+10-bit saturating counter, PSEL, goes up on every miss in an SRRIP leader and
+down on every miss in a BRRIP leader. The remaining 960 follower sets insert
+the BRRIP way when PSEL's top bit is set and the SRRIP way otherwise. Hits,
+aging and victim selection are SRRIP's, unchanged, and there is one RRPV per
+line.
+
+**Left panel: which policy the duel picked.** This comes from the policy's own
+counters, not from inferring it out of miss rates. Through the transition
+region, 1.125 to 1.75 MiB, the followers insert the BRRIP way 95 to 99 percent
+of the time. Past about 2.3 MiB they settle on SRRIP. The hollow points below
+capacity are noise: almost everything hits there, so PSEL barely moves from
+where it started.
+
+**Middle panel: what dueling costs.** DRRIP's miss rate minus the better of
+SRRIP and BRRIP at each point, drawn against the SRRIP-to-BRRIP gap for scale.
+The cost peaks at 2.1 percentage points at 1.25 MiB, against a 53-point gap
+between the static policies. Theory predicts almost exactly this: one set in
+32 is an SRRIP leader and keeps thrashing at SRRIP's 0.93 miss rate even after
+the duel has been decided.
+
+| Working set | LRU | SRRIP | BRRIP | DRRIP | follower inserts the BRRIP way |
+|---|---|---|---|---|---|
+| 1.125 MiB | 0.9942 | 0.7839 | 0.2585 | **0.2767** | 97% |
+| 1.25 MiB | 0.9923 | 0.9268 | 0.3998 | **0.4206** | 98% |
+| 1.5 MiB | 0.9942 | 0.9807 | 0.6687 | **0.6825** | 99% |
+| 2 MiB | 0.9888 | 0.9879 | 0.9740 | **0.9856** | 21% |
+| mixed.c, 512 KiB hot set | 0.6122 | 0.6189 | 0.6695 | **0.6245** | 19% |
+
+**Where the duel is blind.** At 2 MiB BRRIP is better by 1.4 points, yet the
+followers mostly insert the SRRIP way. Past 2.3 MiB the two static policies
+are within 0.002 of each other. With 32 leader sets each and both groups
+missing on nearly every access, a difference that small is not enough signal
+to move PSEL consistently in one direction. DRRIP can only choose correctly
+when the choice is worth something, which is mostly harmless: where it
+cannot tell, there is little to lose.
+
+**Right panel: the negative result.** `phases.c` alternates a 1.25 MiB chase,
+which thrashes and favours BRRIP, with a 768 KiB chase that fits. The intent
+was a workload where a static policy is wrong for half the run, so DRRIP
+could beat both. It did not work out that way. BRRIP rebuilds the small list
+quickly enough that it loses almost nothing in the fitting phase, so BRRIP
+wins outright at every phase length from 25k to 800k steps. DRRIP correctly
+follows it, about one point behind. A phase change alone does not create a
+regime where SRRIP wins; the other phase has to contain something BRRIP is
+actually bad at. An exploratory run that alternated the thrashing chase with
+`mixed.c`'s hot-set-plus-stream phase did show the followers splitting 52/48
+between the two policies. DRRIP came in 0.2 points under BRRIP there, which
+is a single configuration and too thin a margin to claim. It is recorded in
+`NOTES.md` and not in the dataset.
+
+**Reference check.** gem5 ships its own `DRRIPRP`, built on a generic
+`DuelingRP` that keeps a separate copy of the RRIP state for each competing
+policy. Mine keeps one RRPV per line and varies only insertion, which is
+what the paper describes. Configured with the same leader density, the two
+agree to within 1.2 percent on chase (1,278,504 against 1,292,969 misses) and
+0.6 percent on mixed (463,465 against 460,522). Close agreement is expected;
+an exact match is not.
 
 ## Scope
 
-Implemented: SRRIP, BRRIP, the sweep harness, and the measurement.
+Implemented: SRRIP, BRRIP, DRRIP with set dueling, the sweep harness, and the
+measurement.
 
-**Not implemented: DRRIP.** The runtime set-dueling mechanism is deliberately
-out of scope, and nothing here should be read as claiming otherwise.
+Not done:
 
-The crossover measured above is precisely the argument for DRRIP. Two static
-policies each win in a different regime, and the regime boundary sits near
-cache capacity, which no compiler or programmer knows in advance. DRRIP
-resolves this by dedicating a small number of sets to SRRIP and another small
-number to BRRIP, then running a saturating counter on which of the two sampled
-groups is taking fewer misses; the remaining majority of sets follow whichever
-is currently ahead. The measurement here says how much such a mechanism could
-win and over what range, which is the input that a dueling implementation
-would need anyway.
+- **Out-of-order core.** Every number here comes from `TimingSimpleCPU`. Miss
+  rate is a property of the access stream and barely moves on an O3 core. What
+  would change is how much a miss *costs*, because an O3 core can overlap
+  independent misses. So the speedup from fewer misses would be largest on the
+  dependent-load pointer chase and smaller on the streaming workloads.
+- **Thread-aware DRRIP.** Single core only. The paper's multi-core variant
+  duels per thread.
+- **No DRRIP parameter sweep.** Leader density (32 sets per constituency) and
+  PSEL width (10 bits) are at the paper's defaults and were not varied.
 
 ## What the two supporting workloads add
 
@@ -121,7 +208,8 @@ more than it looks.
 `mixed.c` interleaves a small hot set, re-read four times per phase, with a
 2 MiB streaming scan that is never reused. BRRIP is worse than both LRU and
 SRRIP here, and the gap widens as the hot set grows: at a 512 KiB hot set,
-LRU misses 61.2 percent, SRRIP 61.9 percent and BRRIP 67.0 percent. The
+LRU misses 61.2 percent, SRRIP 61.9 percent and BRRIP 67.0 percent, with
+DRRIP at 62.5 percent because it duels its way onto SRRIP. The
 reason is the same mechanism that makes BRRIP win on `chase.c`. Inserting
 almost everything at the distant re-reference interval means a hot set being
 pulled back into the cache cannot accumulate, because each newly inserted hot
@@ -133,7 +221,7 @@ what it sees is exactly right when nothing fits and exactly wrong when
 something does.
 
 `stream.c` is the control. A sequential scan past capacity has no reuse at any
-distance a cache can exploit, so all three policies land on a 1.0000 miss rate,
+distance a cache can exploit, so all four policies land on a 1.0000 miss rate,
 identical to four decimal places. If they had not, the harness would be
 suspect.
 
@@ -141,17 +229,17 @@ suspect.
 
 L2 miss rate on `chase.c`, 1 MiB 16-way L2, no prefetchers.
 
-| Working set | LRU | SRRIP | BRRIP |
-|---|---|---|---|
-| 512 KiB | 0.0036 | 0.0036 | 0.0036 |
-| 1 MiB | 0.0093 | 0.0083 | 0.0083 |
-| 1.125 MiB | 0.9942 | 0.7846 | **0.2569** |
-| 1.25 MiB | 0.9923 | 0.9273 | **0.4008** |
-| 1.5 MiB | 0.9942 | 0.9806 | **0.6690** |
-| 1.75 MiB | 0.9928 | 0.9825 | **0.8958** |
-| 2 MiB | 0.9888 | 0.9880 | 0.9739 |
-| 3 MiB | 0.9862 | 0.9863 | 0.9860 |
-| 16 MiB | 0.9419 | 0.9424 | 0.9429 |
+| Working set | LRU | SRRIP | BRRIP | DRRIP |
+|---|---|---|---|---|
+| 512 KiB | 0.0036 | 0.0036 | 0.0036 | 0.0036 |
+| 1 MiB | 0.0093 | 0.0083 | 0.0083 | 0.0083 |
+| 1.125 MiB | 0.9942 | 0.7839 | **0.2585** | 0.2767 |
+| 1.25 MiB | 0.9923 | 0.9268 | **0.3998** | 0.4206 |
+| 1.5 MiB | 0.9942 | 0.9807 | **0.6687** | 0.6825 |
+| 1.75 MiB | 0.9928 | 0.9827 | **0.8953** | 0.9005 |
+| 2 MiB | 0.9888 | 0.9879 | 0.9740 | 0.9856 |
+| 3 MiB | 0.9862 | 0.9863 | 0.9860 | 0.9863 |
+| 16 MiB | 0.9419 | 0.9424 | 0.9429 | 0.9424 |
 
 The full dataset, including MPKI and instruction counts for every run, is in
 [`results/data.csv`](results/data.csv). It is committed so the plot can be
@@ -160,7 +248,7 @@ checked without re-running anything.
 Two things worth noting in that table. SRRIP beats LRU substantially in the
 transition region, which is its scan resistance doing what it is supposed to
 do, but it converges back to LRU by 2 MiB because scan resistance is not
-thrash resistance. And past about 3 MiB all three policies are within 0.0011 of
+thrash resistance. And past about 3 MiB all four policies are within 0.0011 of
 each other, because at four times capacity there is nothing left for any
 replacement decision to protect.
 
@@ -171,7 +259,7 @@ numbers above were generated.
 
 **The policy parameter actually reaches the cache.** Running the same binary
 under `--policy LRU` and `--policy Random` must produce different L2 miss
-counts. It does: 1,581,765 against 1,550,485 at identical instruction counts.
+counts. It does: 3,081,753 against 3,023,520 at identical instruction counts.
 Without this check, a silently ignored policy flag would produce a complete,
 plausible, entirely meaningless dataset.
 
@@ -180,7 +268,9 @@ implementation. `configs/run.py` exposes it as `--policy SRRIP_REF` and
 `--policy BRRIP_REF` purely for comparison, and my implementations produce
 **bit-identical miss counts** to it on both workloads. Mine was written from
 the paper rather than from that code, which is the point of the exercise, but
-agreeing with it exactly is good evidence the result is real.
+agreeing with it exactly is good evidence the result is real. DRRIP has a
+looser reference check, described in [the DRRIP section](#drrip-set-dueling),
+because gem5's version is a slightly different algorithm.
 
 The comparison only holds with `hit_priority=True` on gem5's side. Its default
 is `False`, which is the paper's frequency-priority variant where a hit
@@ -194,8 +284,8 @@ comparing against it initially made a correct implementation look broken.
   meaningful amount of config work and would not change the comparison.
 - **`TimingSimpleCPU`, not out-of-order.** MPKI is a property of the access
   stream and the cache. An in-order core produces the same stream and
-  simulates fast enough to make a 60-plus-point sweep practical.
-- **Microbenchmarks, not SPEC.** Three small C programs whose working sets are
+  simulates fast enough to make a 120-point sweep practical.
+- **Microbenchmarks, not SPEC.** Four small C programs whose working sets are
   set from `argv`, so the sweep does not require recompiling.
 - **Prefetchers off, at both L1D and L2.** gem5's standard library attaches a
   stride prefetcher to each. An L1 prefetcher issues its own requests down to
@@ -234,10 +324,10 @@ The full warmed dataset is in
 |---|---|---|---|---|---|---|
 | 512 KiB | 0.0036 | 0.0001 | 0.0036 | 0.0001 | 0.0036 | 0.0001 |
 | 1 MiB | 0.0093 | 0.0002 | 0.0083 | 0.0002 | 0.0083 | 0.0002 |
-| 1.125 MiB | 0.9942 | 1.0000 | 0.7846 | 0.7852 | 0.2569 | 0.2532 |
-| 1.25 MiB | 0.9923 | 1.0000 | 0.9273 | 0.9317 | 0.4008 | 0.3982 |
-| 1.5 MiB | 0.9942 | 1.0000 | 0.9806 | 0.9865 | 0.6690 | 0.6717 |
-| 2 MiB | 0.9888 | 1.0000 | 0.9880 | 0.9993 | 0.9739 | 0.9843 |
+| 1.125 MiB | 0.9942 | 1.0000 | 0.7839 | 0.7845 | 0.2585 | 0.2550 |
+| 1.25 MiB | 0.9923 | 1.0000 | 0.9268 | 0.9312 | 0.3998 | 0.3955 |
+| 1.5 MiB | 0.9942 | 1.0000 | 0.9807 | 0.9865 | 0.6687 | 0.6713 |
+| 2 MiB | 0.9888 | 1.0000 | 0.9879 | 0.9992 | 0.9740 | 0.9845 |
 
 Warmup changes the absolute numbers substantially and in exactly the places
 theory says it should. Below capacity the miss rate falls by more than an
@@ -252,15 +342,23 @@ actually consists of, barely moves:
 
 | Working set | SRRIP minus BRRIP, cold | warm |
 |---|---|---|
-| 1.125 MiB | 0.5277 | 0.5320 |
-| 1.25 MiB | 0.5265 | 0.5335 |
-| 1.5 MiB | 0.3116 | 0.3148 |
-| 1.75 MiB | 0.0868 | 0.0859 |
-| 2 MiB | 0.0141 | 0.0150 |
+| 1.125 MiB | 0.5255 | 0.5295 |
+| 1.25 MiB | 0.5271 | 0.5356 |
+| 1.5 MiB | 0.3120 | 0.3152 |
+| 1.75 MiB | 0.0873 | 0.0863 |
+| 2 MiB | 0.0139 | 0.0148 |
 
 So the cold-cache argument holds up: the absolute miss rates were inflated,
 the deltas were not, and the conclusion is the same either way. The warmed
 numbers are the ones to quote, and both datasets are committed.
+
+DRRIP holds up the same way. Warmed, it reads 0.2711 at 1.125 MiB and 0.4170
+at 1.25 MiB, against 0.2767 and 0.4206 cold, and its gap to BRRIP is never
+more than 2.1 points. The warmed version of the DRRIP figure is
+[`plots/drrip_warmup.png`](plots/drrip_warmup.png). The duel's choices are
+cleaner there. Through the transition the followers insert the BRRIP way 100
+percent of the time, and past 2.3 MiB they sit at exactly 0 percent. The
+blind spot described above shows up more starkly.
 
 One caveat on the warmed data. At the largest working sets the benchmark
 spends a growing share of its instructions building the permuted list, so a
@@ -277,6 +375,7 @@ affect the transition region, which is where every conclusion here comes from.
 ├── src/
 │   ├── srrip_rp.hh/.cc         SRRIP
 │   ├── brrip_custom_rp.hh/.cc  BRRIP, inherits SRRIP and overrides reset()
+│   ├── drrip_custom_rp.hh/.cc  DRRIP, set dueling between the two
 │   └── ReplacementPolicies.py.snippet   SimObject registration
 ├── configs/
 │   ├── run.py                  one simulation: policy, geometry, benchmark
@@ -285,20 +384,22 @@ affect the transition region, which is where every conclusion here comes from.
 │   ├── build.sh
 │   ├── chase.c                 randomly permuted pointer chase, the workhorse
 │   ├── stream.c                sequential scan, the control
-│   └── mixed.c                 hot set plus streaming scan
+│   ├── mixed.c                 hot set plus streaming scan
+│   └── phases.c                thrashing and fitting chases, alternating
 ├── scripts/
 │   ├── install_policies.sh     copy into a gem5 tree, register, rebuild
 │   ├── sweep.sh                run the full sweep in parallel
 │   ├── scrape.py               stats.txt and config.json to CSV
 │   └── plot.py                 the figures
 ├── results/
-│   ├── data.csv                cold-cache dataset, 72 runs
-│   └── data_warmup.csv         same sweep with warmup, 72 runs
+│   ├── data.csv                cold-cache dataset, 120 runs
+│   └── data_warmup.csv         same sweep with warmup, 120 runs
 └── plots/
     ├── crossover.png           miss rate and MPKI vs working set
     ├── brrip_improvement.png   how much BRRIP wins by, and where
+    ├── drrip.png               what the duel picked, what it cost, phases.c
     ├── workloads.png           mixed.c hot-set sweep and stream.c control
-    └── *_warmup.png            the same two figures from the warmed dataset
+    └── *_warmup.png            the same figures from the warmed dataset
 ```
 
 ## Reproducing
@@ -322,14 +423,17 @@ scripts/scrape.py ~/srrip-work/m5out -o results/data.csv
 scripts/plot.py -i results/data.csv -o plots/crossover.png
 ```
 
-`install_policies.sh` copies the four policy sources into
+`install_policies.sh` copies the six policy sources into
 `src/mem/cache/replacement_policies/`, appends the SimObject declarations to
 `ReplacementPolicies.py`, adds the sources to the `SConscript`, and rebuilds.
 Re-running it does not duplicate the registrations.
 
-Note that the policies are named `SRRIPRP` and `BRRIPCustomRP`. gem5 already
-ships a `BRRIPRP`, so the custom name keeps both in the same binary and leaves
-upstream untouched.
+Note that the policies are named `SRRIPRP`, `BRRIPCustomRP` and
+`DRRIPCustomRP`. gem5 already ships a `BRRIPRP` and a `DRRIPRP`, so the custom
+names keep both versions in the same binary and leave upstream untouched.
+
+For the warmed dataset, set `WARMUP_INSTS=4000000` on the sweep and write to a
+separate output directory.
 
 ## Implementation
 
@@ -362,3 +466,20 @@ Instead of scanning for the maximum RRPV, aging everything, and rescanning, it
 finds the largest RRPV present in a single pass and ages every candidate by
 exactly the difference. The victim and the resulting counter values are
 identical, because aging applies the same increment to every candidate.
+
+`DRRIPCustom` inherits from `BRRIPCustom`, so it has both insertion behaviours
+available, and adds only the choice between them. One interface problem had
+to be solved. Whether a line is in a leader set depends on its set index, and
+gem5 does not pass the set to `reset()`. But `getVictim()` sees the
+candidates, every candidate knows its set, and gem5 calls `getVictim()`
+exactly once per miss, just before inserting into the way it returns. So the
+duel runs entirely inside `getVictim()`:
+1. Count the miss against the set's leader group, if it has one.
+2. Choose the insertion mode.
+3. Leave the choice in the victim's replacement data.
+
+`reset()` then reads that flag and calls SRRIP's or BRRIP's insertion
+unchanged. The cache invalidates the victim between those two calls, so
+`invalidate()` must leave the flag alone, and it does. PSEL and the follower
+counts are exported as gem5 stats, so the duel's decisions can be read
+straight out of `stats.txt`.

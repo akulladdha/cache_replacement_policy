@@ -261,3 +261,92 @@ Consequence: every run in the committed dataset uses the same
 `$REPO_ROOT/benchmarks/bin` path, via `sweep.sh`. Re-running one point from
 that path reproduces the committed number exactly. Do not mix binary
 locations within a dataset.
+
+## DRRIP (follow-up, 2026-10-20)
+
+`DRRIPCustom` in `src/drrip_custom_rp.*`, SimObject `DRRIPCustomRP`.
+gem5 already ships `DRRIPRP` (on `DuelingRP`), hence the custom name.
+
+- gem5 never tells `reset()` the set. `getVictim()` does see it via
+  `candidate->getSet()`, and it runs exactly once per miss right before
+  `insertBlock()`. Order in `BaseCache::allocateBlock`: `findVictim` ->
+  `getVictim`, then `handleEvictions` -> `invalidate()` on the victim, then
+  `insertBlock` -> `reset()`. So the duel decision goes in `getVictim()` and
+  is parked in the victim's repl data. `invalidate()` must not clear it.
+- Leaders: complement-select. k = (set / C) % C, offset = set % C. SRRIP
+  leader if offset == k, BRRIP leader if offset == C-1-k. C must be even
+  or the two can collide. C = 32 -> 32 + 32 leaders of 1024 sets.
+- PSEL 10 bits, starts at threshold-1 (followers start on SRRIP). Up on
+  SRRIP-leader miss, down on BRRIP-leader miss, followers BRRIP iff
+  PSEL >= 512.
+- Stats appear as `board.cache_hierarchy.l2-cache-0.replacement_policy.`
+  {srripLeaderMisses, brripLeaderMisses, followerSRRIPInserts,
+  followerBRRIPInserts, psel, followerBRRIPFraction}. Scraped into
+  `drrip_psel` and `drrip_follower_brrip`.
+- `DRRIP_REF` in run.py = gem5 DRRIPRP with constituency_size = 32 * assoc
+  entries and team_size = assoc. gem5 counts constituencies in *entries*,
+  allocated set-major, so that is one leader set per team per 32 sets. Not
+  bit-comparable: gem5 keeps separate RRIP state per team. chase 1280:
+  1278504 mine vs 1292969 ref. mixed 512: 463465 vs 460522.
+
+### install_policies.sh bug
+
+The SConscript edit replaced `'WeightedLRURP'])`. After the first install
+the list ends `'BRRIPCustomRP'])`, so a newly added name would silently not
+be registered -> "SimObject not found" at config time. Now a regex inserts
+before the closing bracket. Tested twice on a copy, idempotent.
+
+### Binaries changed, whole dataset re-run
+
+Rebuilding benchmarks (to add phases.c) changed simInsts for chase 1280 from
+8,336,428 to 8,336,444. Old binaries were from 2026-09-08; gcc has been
+updated since. Per the binary-path rule above, did not mix: re-ran the whole
+sweep, cold (m5out-v2, 461s) and warm (m5out-warm-v2, 378s), 120 points each.
+Re-ran the gates on the new binaries:
+
+| check | result |
+|---|---|
+| LRU vs Random, chase 4096 | 3081753 vs 3023520, simInsts both 9868412 |
+| chase 1280 SRRIP vs SRRIP_REF | 2817108 = 2817108 |
+| chase 1280 BRRIP vs BRRIP_REF | 1215121 = 1215121 |
+| mixed 512 SRRIP vs SRRIP_REF | 459330 = 459330 |
+| mixed 512 BRRIP vs BRRIP_REF | 496818 = 496818 |
+
+### scrape.py bug
+
+`l2_size`/`l2_assoc` columns held L1 geometry (32768/8) because the config
+walk matched any node with assoc + replacement_policy and the L1s come first.
+Now matches name == "l2-cache-0". Old CSVs had this wrong; new ones say
+1048576/16.
+
+### Results
+
+DRRIP within 2.1 points of best static everywhere. Cost peaks just past
+capacity: 1/32 of sets are SRRIP leaders still thrashing at ~0.93.
+Duel blind past ~2 MiB: static policies within 0.002, PSEL drifts to SRRIP.
+At 2 MiB it picks SRRIP (21% BRRIP) though BRRIP is 1.4 pts better.
+
+phases.c (1280 big / 768 small alternating) was supposed to make SRRIP win
+the fitting phase. It doesn't: BRRIP wins outright at every phase length and
+DRRIP follows (~95% BRRIP). Kept in the sweep as an honest result.
+
+Exploratory, NOT in the dataset: scratch phases2.c alternating chase 1280
+with a mixed.c phase (512K hot x4 + 2M stream). 1280 / steps / mixreps /
+phases:
+
+| config | LRU | SRRIP | BRRIP | DRRIP | DRRIP fBR |
+|---|---|---|---|---|---|
+| 200k steps, 3 mixed reps, 8 phases | 0.7976 | 0.7848 | 0.5840 | 0.5907 | 0.928 |
+| 800k steps, 12 mixed reps, 4 phases | 0.7974 | 0.7760 | 0.5505 | 0.5487 | 0.525 |
+
+The 800k case is the one place DRRIP beats both, by 0.0018, with the
+followers genuinely split. One config, tiny margin, so not claimed. A real
+version would need the SRRIP-favoured phase to be worth a lot more than
+mixed.c's ~5 points.
+
+### Warmup does nothing for mixed at small hot sets
+
+mixed 64/128/256 warm == cold to 4 decimals: the program finishes inside the
+4M-instruction warmup, so stats never reset and the "warm" number is the cold
+one. Pre-existing, not DRRIP-related. Only mixed 512 actually got a measured
+window. Worth fixing by scaling warmup per benchmark if it matters.
